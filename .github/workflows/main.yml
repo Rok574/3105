@@ -1,0 +1,211 @@
+# Save as: .github/workflows/decompile-ipa.yml
+#
+# Reverse-engineers a DECRYPTED .ipa into:
+#   - resources/   Info.plist, strings, nibs, etc. (plists converted to XML)
+#   - headers/     Objective-C headers (ipsw class-dump) + Swift type dump
+#   - objc_dump/   otool -ov fallback dump of ObjC metadata
+#   - decompiled/  Ghidra pseudo-C for every function
+#
+# Note: this recovers *equivalent* code, not the original source. Names of
+# locals, comments, macros and inlined code are gone for compiled binaries.
+
+name: Decompile IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_path:
+        description: "Path to an .ipa committed in this repo (e.g. apps/MyApp.ipa)"
+        required: false
+        default: ""
+      ipa_url:
+        description: "Or a direct download URL to a decrypted .ipa"
+        required: false
+        default: ""
+      include_frameworks:
+        description: "Also process embedded .framework binaries"
+        type: boolean
+        default: false
+      run_ghidra:
+        description: "Run Ghidra pseudo-C decompilation (slow on big apps)"
+        type: boolean
+        default: true
+
+env:
+  GHIDRA_VERSION: "11.2.1"
+  GHIDRA_DATE: "20241105"
+
+jobs:
+  decompile:
+    runs-on: macos-14   # needs lipo/otool/plutil; Apple Silicon runner
+    timeout-minutes: 300
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch and unpack IPA
+        env:
+          IPA_URL: ${{ inputs.ipa_url }}
+          IPA_PATH: ${{ inputs.ipa_path }}
+        run: |
+          set -euo pipefail
+          mkdir -p work out
+          cd work
+          if [ -n "$IPA_URL" ]; then
+            curl -fL "$IPA_URL" -o app.ipa
+          elif [ -n "$IPA_PATH" ]; then
+            cp "$GITHUB_WORKSPACE/$IPA_PATH" app.ipa
+          else
+            echo "::error::Provide ipa_path or ipa_url"; exit 1
+          fi
+          unzip -q app.ipa -d extracted
+          APP=$(find extracted/Payload -maxdepth 1 -name '*.app' | head -1)
+          [ -n "$APP" ] || { echo "::error::No .app found in Payload/"; exit 1; }
+          EXEC=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
+          echo "APP=$PWD/$APP"   >> "$GITHUB_ENV"
+          echo "EXEC=$EXEC"      >> "$GITHUB_ENV"
+          echo "OUT=$GITHUB_WORKSPACE/out" >> "$GITHUB_ENV"
+          echo "Unpacked $APP (executable: $EXEC)"
+
+      - name: Extract readable resources
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT/resources"
+          rsync -a --exclude="$EXEC" "$APP/" "$OUT/resources/"
+          # Binary plists / .strings -> XML so they diff and read well
+          find "$OUT/resources" \( -name '*.plist' -o -name '*.strings' \) \
+            -exec plutil -convert xml1 {} \; 2>/dev/null || true
+          # Compiled storyboards/nibs are binary plists too
+          find "$OUT/resources" -name '*.nib' -type f \
+            -exec plutil -convert xml1 {} \; 2>/dev/null || true
+
+      - name: Install ipsw
+        run: brew install blacktop/tap/ipsw
+
+      - name: Dump headers / ObjC / Swift metadata
+        env:
+          INCLUDE_FRAMEWORKS: ${{ inputs.include_frameworks }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT/headers" "$OUT/objc_dump" "$OUT/thin"
+
+          process() {
+            local name="$1" bin="$2"
+            [ -f "$bin" ] || return 0
+            local thin="$OUT/thin/$name"
+
+            if lipo -archs "$bin" 2>/dev/null | grep -q arm64; then
+              if [ "$(lipo -archs "$bin" | wc -w)" -gt 1 ]; then
+                lipo "$bin" -thin arm64 -output "$thin"
+              else
+                cp "$bin" "$thin"
+              fi
+            else
+              echo "::warning::$name has no arm64 slice, skipping"; return 0
+            fi
+
+            local cryptid
+            cryptid=$(otool -l "$thin" | awk '/cryptid/ {print $2; exit}')
+            if [ "${cryptid:-0}" = "1" ]; then
+              echo "::error::$name is FairPlay-encrypted. Provide a decrypted IPA (e.g. dumped from a jailbroken device)."
+              exit 1
+            fi
+
+            ipsw class-dump "$thin" --arch arm64 --headers --output "$OUT/headers/$name" || true
+            ipsw swift-dump "$thin" --arch arm64 > "$OUT/headers/$name.swift-types.txt" 2>/dev/null || true
+            otool -ov "$thin" > "$OUT/objc_dump/$name.txt" 2>/dev/null || true
+            strings -a "$thin" > "$OUT/objc_dump/$name.strings.txt" || true
+          }
+
+          process "$EXEC" "$APP/$EXEC"
+
+          if [ "$INCLUDE_FRAMEWORKS" = "true" ] && [ -d "$APP/Frameworks" ]; then
+            for fw in "$APP"/Frameworks/*.framework; do
+              [ -d "$fw" ] || continue
+              fexec=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$fw/Info.plist" 2>/dev/null || basename "$fw" .framework)
+              process "$fexec" "$fw/$fexec"
+            done
+          fi
+
+      - name: Set up Java for Ghidra
+        if: ${{ inputs.run_ghidra }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Ghidra
+        if: ${{ inputs.run_ghidra }}
+        run: |
+          set -euo pipefail
+          curl -fL -o ghidra.zip \
+            "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip"
+          unzip -q ghidra.zip -d "$RUNNER_TEMP"
+          echo "GHIDRA_HOME=$RUNNER_TEMP/ghidra_${GHIDRA_VERSION}_PUBLIC" >> "$GITHUB_ENV"
+
+      - name: Decompile to pseudo-C with Ghidra
+        if: ${{ inputs.run_ghidra }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT/decompiled" "$RUNNER_TEMP/gscripts" "$RUNNER_TEMP/gproj"
+
+          cat > "$RUNNER_TEMP/gscripts/DecompileAll.java" <<'EOF'
+          import ghidra.app.script.GhidraScript;
+          import ghidra.app.decompiler.DecompInterface;
+          import ghidra.app.decompiler.DecompileResults;
+          import ghidra.program.model.listing.Function;
+          import ghidra.program.model.listing.FunctionIterator;
+          import java.io.File;
+          import java.io.FileWriter;
+          import java.io.PrintWriter;
+
+          public class DecompileAll extends GhidraScript {
+            @Override
+            public void run() throws Exception {
+              String[] args = getScriptArgs();
+              File out = new File(args[0]);
+              DecompInterface ifc = new DecompInterface();
+              ifc.openProgram(currentProgram);
+              try (PrintWriter w = new PrintWriter(new FileWriter(out))) {
+                FunctionIterator it = currentProgram.getFunctionManager().getFunctions(true);
+                while (it.hasNext() && !monitor.isCancelled()) {
+                  Function f = it.next();
+                  if (f.isThunk() || f.isExternal()) continue;
+                  DecompileResults r = ifc.decompileFunction(f, 60, monitor);
+                  if (r.decompileCompleted()) {
+                    w.println("// " + f.getEntryPoint() + "  " + f.getName(true));
+                    w.println(r.getDecompiledFunction().getC());
+                  }
+                }
+              }
+              ifc.dispose();
+            }
+          }
+          EOF
+
+          for bin in "$OUT"/thin/*; do
+            name=$(basename "$bin")
+            "$GHIDRA_HOME/support/analyzeHeadless" "$RUNNER_TEMP/gproj" "p_$name" \
+              -import "$bin" \
+              -scriptPath "$RUNNER_TEMP/gscripts" \
+              -postScript DecompileAll.java "$OUT/decompiled/$name.c" \
+              -deleteProject
+          done
+
+      - name: Clean up and summarize
+        run: |
+          rm -rf "$OUT/thin"
+          {
+            echo "## IPA decompilation finished"
+            echo "Executable: \`$EXEC\`"
+            echo
+            echo '```'
+            (cd "$OUT" && du -sh * )
+            echo '```'
+            echo "Download the **decompiled-ipa** artifact below."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decompiled-ipa
+          path: out/
