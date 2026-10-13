@@ -80,7 +80,15 @@ jobs:
             -exec plutil -convert xml1 {} \; 2>/dev/null || true
 
       - name: Install ipsw
-        run: brew install blacktop/tap/ipsw
+        run: |
+          set -euo pipefail
+          brew tap blacktop/tap || true
+          if brew help trust >/dev/null 2>&1; then
+            brew trust blacktop/tap || true
+            # More specific if needed:
+            # brew trust --formula blacktop/tap/ipsw-frida || true
+          fi
+          brew install blacktop/tap/ipsw
 
       - name: Dump headers / ObjC / Swift metadata
         env:
