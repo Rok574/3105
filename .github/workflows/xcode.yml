@@ -1,0 +1,99 @@
+# XcodeGen spec for the "decompiled-ipa" folder layout:
+#
+#   decompiled-ipa/
+#   ├── project.yml      <- this file
+#   ├── decompiled/      source code recovered from the binary
+#   ├── headers/         class-dump / header files
+#   ├── objc_dump/       raw ObjC dumps (reference only)
+#   └── resources/       assets, storyboards, plists, etc.
+#
+# Usage:
+#   brew install xcodegen
+#   cd decompiled-ipa
+#   xcodegen generate
+#   open DecompiledApp.xcodeproj
+
+name: DecompiledApp
+
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGNING_ALLOWED: NO          # flip to YES and set DEVELOPMENT_TEAM when you want to run on device
+    CLANG_ENABLE_OBJC_ARC: NO         # decompiled code is usually pre-ARC style (retain/release)
+    GCC_WARN_INHIBIT_ALL_WARNINGS: YES
+    CLANG_WARN_DOCUMENTATION_COMMENTS: NO
+    ENABLE_BITCODE: NO
+
+targets:
+  DecompiledApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "18.0"
+
+    sources:
+      # Recovered source files (compiled)
+      - path: decompiled
+        excludes:
+          - "**/*.txt"
+          - "**/*.md"
+          - "**/*.json"
+
+      # Headers (visible in the navigator, not compiled)
+      - path: headers
+        buildPhase: none
+
+      # Raw dumps, shown as a plain folder for reference only
+      - path: objc_dump
+        type: folder
+        buildPhase: none
+
+      # Assets, storyboards, xibs, plists, fonts, etc. copied into the bundle
+      - path: resources
+        buildPhase: resources
+        excludes:
+          - "Info.plist"              # handled via the info: block below
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.DecompiledApp
+        PRODUCT_NAME: DecompiledApp
+        TARGETED_DEVICE_FAMILY: "1,2"
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/headers"
+          - "$(SRCROOT)/decompiled"
+        USER_HEADER_SEARCH_PATHS: "$(SRCROOT)/headers/**"
+        ALWAYS_SEARCH_USER_PATHS: NO
+        # Uncomment if the decompiled code mixes Swift + ObjC and you have a bridging header:
+        # SWIFT_OBJC_BRIDGING_HEADER: headers/DecompiledApp-Bridging-Header.h
+
+    info:
+      path: resources/Info.generated.plist
+      properties:
+        CFBundleDisplayName: DecompiledApp
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # If your resources folder has a Main.storyboard, add:
+        # UIMainStoryboardFile: Main
+
+schemes:
+  DecompiledApp:
+    build:
+      targets:
+        DecompiledApp: all
+    run:
+      config: Debug
+    archive:
+      config: Release
