@@ -5,9 +5,12 @@
 #   - headers/     Objective-C headers (ipsw class-dump) + Swift type dump
 #   - objc_dump/   otool -ov fallback dump of ObjC metadata
 #   - decompiled/  Ghidra pseudo-C for every function
+#   - project.yml + <Name>.xcodeproj   Xcode project (iOS 18) wrapping all of the above
 #
 # Note: this recovers *equivalent* code, not the original source. Names of
 # locals, comments, macros and inlined code are gone for compiled binaries.
+# Ghidra's pseudo-C will not compile as-is, so by default it is browse-only
+# in the Xcode project (set compile_decompiled to true to add it to the build).
 
 name: Decompile IPA
 
@@ -30,6 +33,14 @@ on:
         description: "Run Ghidra pseudo-C decompilation (slow on big apps)"
         type: boolean
         default: true
+      generate_xcode:
+        description: "Generate an Xcode project (XcodeGen) from the output"
+        type: boolean
+        default: true
+      compile_decompiled:
+        description: "Add decompiled/*.c to the Xcode build (usually will not compile)"
+        type: boolean
+        default: false
 
 env:
   GHIDRA_VERSION: "11.2.1"
@@ -62,8 +73,12 @@ jobs:
           APP=$(find extracted/Payload -maxdepth 1 -name '*.app' | head -1)
           [ -n "$APP" ] || { echo "::error::No .app found in Payload/"; exit 1; }
           EXEC=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
+          BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist" 2>/dev/null || echo "com.example.app")
+          NAME=$(echo "$EXEC" | tr -cd 'A-Za-z0-9_')
           echo "APP=$PWD/$APP"   >> "$GITHUB_ENV"
           echo "EXEC=$EXEC"      >> "$GITHUB_ENV"
+          echo "BID=$BID"        >> "$GITHUB_ENV"
+          echo "NAME=$NAME"      >> "$GITHUB_ENV"
           echo "OUT=$GITHUB_WORKSPACE/out" >> "$GITHUB_ENV"
           echo "Unpacked $APP (executable: $EXEC)"
 
@@ -200,6 +215,83 @@ jobs:
               -deleteProject
           done
 
+      - name: Generate Xcode project
+        if: ${{ inputs.generate_xcode }}
+        env:
+          COMPILE_DECOMPILED: ${{ inputs.compile_decompiled }}
+        run: |
+          set -euo pipefail
+          brew install xcodegen
+
+          # Folders must exist even if a step above was skipped
+          mkdir -p "$OUT/decompiled" "$OUT/headers" "$OUT/objc_dump" "$OUT/resources"
+
+          if [ "$COMPILE_DECOMPILED" = "true" ]; then
+            DECOMP_PHASE="sources"
+          else
+            DECOMP_PHASE="none"
+          fi
+
+          cat > "$OUT/project.yml" <<YML
+          name: $NAME
+
+          options:
+            bundleIdPrefix: com.example
+            deploymentTarget:
+              iOS: "18.0"
+            createIntermediateGroups: true
+
+          settings:
+            base:
+              SWIFT_VERSION: "5.0"
+              CODE_SIGNING_ALLOWED: "NO"
+              CLANG_ENABLE_OBJC_ARC: "NO"
+              GCC_WARN_INHIBIT_ALL_WARNINGS: "YES"
+
+          targets:
+            $NAME:
+              type: application
+              platform: iOS
+              deploymentTarget: "18.0"
+              sources:
+                - path: decompiled
+                  optional: true
+                  buildPhase: $DECOMP_PHASE
+                - path: headers
+                  optional: true
+                  buildPhase: none
+                - path: objc_dump
+                  optional: true
+                  type: folder
+                  buildPhase: none
+                - path: resources
+                  optional: true
+                  buildPhase: resources
+                  excludes:
+                    - "Info.plist"
+                    - "_CodeSignature/**"
+                    - "SC_Info/**"
+                    - "Frameworks/**"
+                    - "PlugIns/**"
+                    - "embedded.mobileprovision"
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: $BID
+                  PRODUCT_NAME: $NAME
+                  TARGETED_DEVICE_FAMILY: "1,2"
+                  HEADER_SEARCH_PATHS: "\$(inherited) \$(SRCROOT)/headers \$(SRCROOT)/decompiled"
+              info:
+                path: GeneratedInfo.plist
+                properties:
+                  CFBundleDisplayName: $NAME
+                  CFBundleShortVersionString: "1.0"
+                  CFBundleVersion: "1"
+                  UILaunchScreen: {}
+          YML
+
+          cat "$OUT/project.yml"
+          (cd "$OUT" && xcodegen generate)
+
       - name: Clean up and summarize
         run: |
           rm -rf "$OUT/thin"
@@ -211,6 +303,7 @@ jobs:
             (cd "$OUT" && du -sh * )
             echo '```'
             echo "Download the **decompiled-ipa** artifact below."
+            echo "Unzip it and open \`$NAME.xcodeproj\` in Xcode 16+."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
