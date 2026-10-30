@@ -13,7 +13,7 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - name: Check out workflow and project.yml
+      - name: Check out workflow
         uses: actions/checkout@v4
 
       - name: Download and extract project ZIP
@@ -44,10 +44,33 @@ jobs:
           rm -rf Sources
           cp -R "$SOURCE_DIR" ./Sources
 
+      - name: Create XcodeGen project spec
+        run: |
+          cat > project.yml <<'YAML'
+          name: ProxyBrowser
+          options:
+            bundleIdPrefix: com.proxybrowser
+            deploymentTarget:
+              iOS: "17.0"
+          targets:
+            ProxyBrowser:
+              type: application
+              platform: iOS
+              sources:
+                - Sources
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.proxybrowser.app
+                  SWIFT_VERSION: "5.0"
+                  INFOPLIST_FILE: Sources/Info.plist
+                  GENERATE_INFOPLIST_FILE: NO
+                  TARGETED_DEVICE_FAMILY: "1"
+          YAML
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Generate Xcode project from project.yml
+      - name: Generate Xcode project
         run: xcodegen generate
 
       - name: Build for iOS Simulator
