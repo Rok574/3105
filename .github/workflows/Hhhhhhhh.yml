@@ -1,0 +1,61 @@
+name: Build ProxyBrowser from Catbox ZIP
+
+on:
+  workflow_dispatch:
+    inputs:
+      catbox_zip_url:
+        description: "Paste the direct URL to your project ZIP (files.catbox.moe)"
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out workflow and project.yml
+        uses: actions/checkout@v4
+
+      - name: Download and extract project ZIP
+        env:
+          ZIP_URL: ${{ inputs.catbox_zip_url }}
+        run: |
+          set -euo pipefail
+
+          case "$ZIP_URL" in
+            https://files.catbox.moe/*) ;;
+            *)
+              echo "Enter a direct Catbox URL beginning with https://files.catbox.moe/"
+              exit 1
+              ;;
+          esac
+
+          curl --fail --location --retry 3 "$ZIP_URL" -o /tmp/proxybrowser.zip
+          unzip -t /tmp/proxybrowser.zip
+          mkdir -p /tmp/proxybrowser-src
+          unzip -q /tmp/proxybrowser.zip -d /tmp/proxybrowser-src
+
+          SOURCE_DIR="$(find /tmp/proxybrowser-src -type d -name Sources -print -quit)"
+          if [ -z "$SOURCE_DIR" ]; then
+            echo "The ZIP does not contain a Sources directory."
+            exit 1
+          fi
+
+          rm -rf Sources
+          cp -R "$SOURCE_DIR" ./Sources
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project from project.yml
+        run: xcodegen generate
+
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild \
+            -project ProxyBrowser.xcodeproj \
+            -scheme ProxyBrowser \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            build
