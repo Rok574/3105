@@ -38,6 +38,36 @@ jobs:
           rm -rf Sources
           cp -R "$SOURCE_DIR" ./Sources
 
+      - name: Fix Swift reload button compile error
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("Sources/ContentView.swift")
+          source = path.read_text(encoding="utf-8")
+          pattern = re.compile(
+              r'^(?P<indent>\s*)tab\.isLoading\s*\?\s*tab\.webView\.stopLoading\(\)\s*:\s*tab\.webView\.reload\(\)\s*$',
+              re.MULTILINE,
+          )
+          replacement = (
+              r'\g<indent>if tab.isLoading {\n'
+              r'\g<indent>    tab.webView.stopLoading()\n'
+              r'\g<indent>} else {\n'
+              r'\g<indent>    tab.webView.reload()\n'
+              r'\g<indent>}'
+          )
+          updated, count = pattern.subn(replacement, source, count=1)
+          if count != 1:
+              raise SystemExit(
+                  "Could not find the exact reload/stopLoading expression in "
+                  "Sources/ContentView.swift. Check whether the Catbox ZIP has the expected source version."
+              )
+          path.write_text(updated, encoding="utf-8")
+          print("Patched ContentView.swift: reload/stopLoading now uses if/else.")
+          PY
+
       - name: Create XcodeGen spec
         run: |
           cat > project.yml <<'YAML'
@@ -61,7 +91,7 @@ jobs:
                   TARGETED_DEVICE_FAMILY: "1"
                   SUPPORTED_PLATFORMS: "iphoneos"
           YAML
-          
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
