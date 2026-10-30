@@ -1,50 +1,44 @@
-name: Build ProxyBrowser from Catbox ZIP
+name: Build ProxyBrowser for iPhone (Unsigned)
 
 on:
   workflow_dispatch:
     inputs:
       catbox_zip_url:
-        description: "Paste the direct URL to your project ZIP (files.catbox.moe)"
+        description: "Direct Catbox ZIP URL containing the ProxyBrowser Sources folder"
         required: true
         type: string
 
 jobs:
-  build:
+  build-iphone:
     runs-on: macos-latest
-
     steps:
       - name: Check out workflow
         uses: actions/checkout@v4
 
-      - name: Download and extract project ZIP
+      - name: Download and extract source ZIP
         env:
           ZIP_URL: ${{ inputs.catbox_zip_url }}
         run: |
           set -euo pipefail
-
           case "$ZIP_URL" in
             https://files.catbox.moe/*) ;;
-            *)
-              echo "Enter a direct Catbox URL beginning with https://files.catbox.moe/"
-              exit 1
-              ;;
+            *) echo "Use a direct https://files.catbox.moe/ ZIP URL"; exit 1 ;;
           esac
 
-          curl --fail --location --retry 3 "$ZIP_URL" -o /tmp/proxybrowser.zip
-          unzip -t /tmp/proxybrowser.zip
-          mkdir -p /tmp/proxybrowser-src
-          unzip -q /tmp/proxybrowser.zip -d /tmp/proxybrowser-src
+          curl --fail --location --retry 3 "$ZIP_URL" -o "$RUNNER_TEMP/proxybrowser.zip"
+          unzip -t "$RUNNER_TEMP/proxybrowser.zip"
+          mkdir -p "$RUNNER_TEMP/source"
+          unzip -q "$RUNNER_TEMP/proxybrowser.zip" -d "$RUNNER_TEMP/source"
 
-          SOURCE_DIR="$(find /tmp/proxybrowser-src -type d -name Sources -print -quit)"
+          SOURCE_DIR="$(find "$RUNNER_TEMP/source" -type d -name Sources -print -quit)"
           if [ -z "$SOURCE_DIR" ]; then
-            echo "The ZIP does not contain a Sources directory."
+            echo "ZIP must contain a Sources directory with Swift files and Info.plist."
             exit 1
           fi
-
           rm -rf Sources
           cp -R "$SOURCE_DIR" ./Sources
 
-      - name: Create XcodeGen project spec
+      - name: Create XcodeGen spec
         run: |
           cat > project.yml <<'YAML'
           name: ProxyBrowser
@@ -65,20 +59,46 @@ jobs:
                   INFOPLIST_FILE: Sources/Info.plist
                   GENERATE_INFOPLIST_FILE: NO
                   TARGETED_DEVICE_FAMILY: "1"
+                  SUPPORTED_PLATFORMS: "iphoneos"
           YAML
-
+          
       - name: Install XcodeGen
         run: brew install xcodegen
 
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build for iOS Simulator
+      - name: Build unsigned app for physical iPhone
         run: |
+          set -o pipefail
           xcodebuild \
             -project ProxyBrowser.xcodeproj \
             -scheme ProxyBrowser \
-            -sdk iphonesimulator \
-            -configuration Debug \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             build
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/ProxyBrowser.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Build did not produce ProxyBrowser.app"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/ProxyBrowser.app"
+          cd "$RUNNER_TEMP/ipa"
+          zip -qr "$RUNNER_TEMP/ProxyBrowser-unsigned.ipa" Payload
+
+      - name: Upload unsigned iPhone IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProxyBrowser-iPhone-unsigned-IPA
+          path: ${{ runner.temp }}/ProxyBrowser-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
