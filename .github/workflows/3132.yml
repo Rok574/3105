@@ -1,0 +1,72 @@
+name: Build Unsigned IPA from ZIP
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "Direct URL to the project .zip file (e.g., Catbox or GitHub Release)"
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: macos-26
+
+    steps:
+      - name: Select Latest Xcode
+        run: |
+          XCODE_APP=$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+
+      - name: Download & Extract ZIP
+        run: |
+          curl -fsSL -L -o project.zip "${{ inputs.zip_url }}"
+          mkdir -p src
+          unzip -q project.zip -d src
+
+          PROJ_DIR=$(find src -maxdepth 3 \( -name "project.yml" -o -name "*.xcodeproj" \) -print -quit | xargs dirname)
+          if [ -z "$PROJ_DIR" ]; then
+            echo "Error: Could not find project.yml or .xcodeproj inside the ZIP."
+            exit 1
+          fi
+          echo "PROJ_DIR=$PROJ_DIR" >> "$GITHUB_ENV"
+
+      - name: Generate Xcode Project (if project.yml exists)
+        working-directory: ${{ env.PROJ_DIR }}
+        run: |
+          if [ -f "project.yml" ]; then
+            brew install xcodegen
+            xcodegen generate
+          fi
+
+      - name: Build Unsigned App
+        working-directory: ${{ env.PROJ_DIR }}
+        run: |
+          XCODEPROJ=$(ls -d *.xcodeproj | head -n 1)
+          SCHEME=$(xcodebuild -project "$XCODEPROJ" -list -json | python3 -c "import sys, json; print(json.load(sys.stdin)['project']['schemes'][0])")
+          echo "APP_NAME=$SCHEME" >> "$GITHUB_ENV"
+
+          xcodebuild \
+            -project "$XCODEPROJ" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package Unsigned IPA
+        working-directory: ${{ env.PROJ_DIR }}
+        run: |
+          mkdir -p Payload
+          APP_PATH=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" -print -quit)
+          cp -R "$APP_PATH" Payload/
+          zip -r "${{ env.APP_NAME }}.ipa" Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-IPA
+          path: ${{ env.PROJ_DIR }}/${{ env.APP_NAME }}.ipa
