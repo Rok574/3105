@@ -1,0 +1,37 @@
+name: Build Dark12
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: Direct download link to the project zip
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Download and unzip project
+        env:
+          ZIP_URL: ${{ inputs.zip_url }}
+        run: |
+          curl -fL --retry 3 -o project.zip "$ZIP_URL"
+          mkdir src
+          unzip -q project.zip -d src
+          MAKEFILE=$(find src -name Makefile -not -path '*/__MACOSX/*' | head -n 1)
+          if [ -z "$MAKEFILE" ]; then echo "No Makefile found in zip"; exit 1; fi
+          echo "PROJECT_DIR=$(dirname "$MAKEFILE")" >> "$GITHUB_ENV"
+
+      - name: Set up Theos
+        uses: Randomblock1/theos-action@v1
+
+      - name: Build
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: make package FINALPACKAGE=1
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dark12-deb
+          path: ${{ env.PROJECT_DIR }}/packages/*.deb
