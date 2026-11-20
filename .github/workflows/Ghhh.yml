@@ -1,0 +1,57 @@
+name: Build AppTrust IPA from ZIP URL
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'Direct download URL to AppTrust-iOS10-Project.zip'
+        required: true
+        type: string
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    steps:
+      - name: Download and Extract Project ZIP
+        run: |
+          curl -L --fail -o project.zip "${{ github.event.inputs.zip_url }}"
+          mkdir -p src
+          unzip -q project.zip -d src
+          PROJ_PATH=$(find src -name "AppTrust.xcodeproj" -maxdepth 3 | head -n 1)
+          if [ -z "$PROJ_PATH" ]; then
+            echo "Error: AppTrust.xcodeproj not found in ZIP"
+            exit 1
+          fi
+          PROJ_DIR=$(dirname "$PROJ_PATH")
+          echo "PROJ_DIR=$PROJ_DIR" >> "$GITHUB_ENV"
+
+      - name: Build AppTrust.app (iOS 10.0+ arm64)
+        run: |
+          cd "$PROJ_DIR"
+          xcodebuild -project AppTrust.xcodeproj \
+            -scheme AppTrust \
+            -configuration Release \
+            -sdk iphoneos \
+            ARCHS=arm64 \
+            IPHONEOS_DEPLOYMENT_TARGET=10.0 \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Sign with ldid & Package IPA
+        run: |
+          cd "$PROJ_DIR"
+          brew install ldid || true
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/AppTrust.app Payload/
+          if [ -f entitlements.plist ]; then
+            ldid -Sentitlements.plist Payload/AppTrust.app/AppTrust || true
+          fi
+          zip -r "${{ github.workspace }}/AppTrust-1.0.0.ipa" Payload
+
+      - name: Upload AppTrust IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppTrust-1.0.0-arm64-IPA
+          path: AppTrust-1.0.0.ipa
