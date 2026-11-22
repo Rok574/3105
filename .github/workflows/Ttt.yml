@@ -1,0 +1,91 @@
+name: Build Theos Tweak from ZIP
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'Direct URL to the Theos project .zip archive'
+        required: true
+        type: string
+      final_package:
+        description: 'Build release package (FINALPACKAGE=1)'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            lld \
+            llvm \
+            curl \
+            git \
+            unzip \
+            dpkg-dev \
+            fakeroot \
+            perl \
+            xz-utils
+
+      - name: Set up Theos and iOS SDK
+        run: |
+          export THEOS="$HOME/theos"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+
+          git clone --recursive --depth=1 https://github.com/theos/theos.git "$THEOS"
+
+          mkdir -p "$THEOS/sdks"
+          SDK_URL=$(curl -fsSL https://api.github.com/repos/theos/sdks/releases/latest \
+            | grep -oE 'https://[^"]+iPhoneOS14\.5\.sdk\.tar\.xz' \
+            | head -n 1)
+          if [ -z "$SDK_URL" ]; then
+            SDK_URL=$(curl -fsSL https://api.github.com/repos/theos/sdks/releases/latest \
+              | grep -oE 'https://[^"]+iPhoneOS[0-9.]+\.sdk\.tar\.xz' \
+              | head -n 1)
+          fi
+          echo "Downloading SDK: $SDK_URL"
+          curl -fsSL "$SDK_URL" -o /tmp/sdk.tar.xz
+          tar -xf /tmp/sdk.tar.xz -C "$THEOS/sdks"
+          rm -f /tmp/sdk.tar.xz
+
+      - name: Download and extract ZIP
+        env:
+          ZIP_URL: ${{ inputs.zip_url }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/src"
+          curl -fL "$ZIP_URL" -o /tmp/project.zip
+          unzip -q /tmp/project.zip -d "$GITHUB_WORKSPACE/src"
+          rm -f /tmp/project.zip
+
+          MAKEFILE_PATH=$(find "$GITHUB_WORKSPACE/src" -maxdepth 3 -name "Makefile" | head -n 1)
+          if [ -z "$MAKEFILE_PATH" ]; then
+            echo "Error: No Makefile found in extracted archive."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$MAKEFILE_PATH")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Detected project directory: $PROJECT_DIR"
+
+      - name: Build .deb package
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ "${{ inputs.final_package }}" = "true" ]; then
+            make package FINALPACKAGE=1
+          else
+            make package
+          fi
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: theos-deb-package
+          path: ${{ env.PROJECT_DIR }}/packages/*.deb
+          if-no-files-found: error
