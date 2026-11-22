@@ -15,7 +15,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
 
     steps:
       - name: Install Theos, toolchain, and SDKs
@@ -35,7 +35,11 @@ jobs:
           unzip -q /tmp/project.zip -d "$GITHUB_WORKSPACE/src"
           rm -f /tmp/project.zip
 
-          MAKEFILE_PATH=$(find "$GITHUB_WORKSPACE/src" -maxdepth 3 -name "Makefile" | head -n 1)
+          MAKEFILE_PATH=$(find "$GITHUB_WORKSPACE/src" -maxdepth 3 -name "Makefile" \
+            | awk '{ print gsub("/", "/"), $0 }' \
+            | sort -n \
+            | head -n 1 \
+            | cut -d' ' -f2-)
           if [ -z "$MAKEFILE_PATH" ]; then
             echo "Error: No Makefile found in extracted archive."
             exit 1
