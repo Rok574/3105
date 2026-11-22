@@ -18,42 +18,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            clang \
-            lld \
-            llvm \
-            curl \
-            git \
-            unzip \
-            dpkg-dev \
-            fakeroot \
-            perl \
-            xz-utils
-
-      - name: Set up Theos and iOS SDK
-        run: |
-          export THEOS="$HOME/theos"
-          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
-
-          git clone --recursive --depth=1 https://github.com/theos/theos.git "$THEOS"
-
-          mkdir -p "$THEOS/sdks"
-          SDK_URL=$(curl -fsSL https://api.github.com/repos/theos/sdks/releases/latest \
-            | grep -oE 'https://[^"]+iPhoneOS14\.5\.sdk\.tar\.xz' \
-            | head -n 1)
-          if [ -z "$SDK_URL" ]; then
-            SDK_URL=$(curl -fsSL https://api.github.com/repos/theos/sdks/releases/latest \
-              | grep -oE 'https://[^"]+iPhoneOS[0-9.]+\.sdk\.tar\.xz' \
-              | head -n 1)
-          fi
-          echo "Downloading SDK: $SDK_URL"
-          curl -fsSL "$SDK_URL" -o /tmp/sdk.tar.xz
-          tar -xf /tmp/sdk.tar.xz -C "$THEOS/sdks"
-          rm -f /tmp/sdk.tar.xz
+      - name: Install Theos, toolchain, and SDKs
+        uses: waruhachi/theos-action@v2.6.6
+        with:
+          theos-src: 'theos/theos'
+          theos-branch: 'master'
+          sdks-src: 'theos/sdks'
+          sdks-branch: 'master'
 
       - name: Download and extract ZIP
         env:
