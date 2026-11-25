@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: "Direct download URL for the Muzo ZIP"
+        description: "Direct URL to the Muzo source ZIP"
         required: true
         type: string
 
@@ -14,67 +14,114 @@ jobs:
     runs-on: macos-15
 
     steps:
-      - name: Download ZIP
+      - name: Download source ZIP
+        shell: bash
         env:
           ZIP_URL: ${{ inputs.zip_url }}
         run: |
-          curl -fL "$ZIP_URL" -o Muzo-source.zip
-          mkdir source
-          unzip -q Muzo-source.zip -d source
+          set -e
+          curl -fL --retry 3 "$ZIP_URL" -o Muzo-source.zip
+          mkdir -p "$GITHUB_WORKSPACE/source"
+          unzip -q Muzo-source.zip -d "$GITHUB_WORKSPACE/source"
 
-      - name: Locate project
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Locate and generate Xcode project
         id: locate
+        shell: bash
         run: |
-          PROJECT_YML=$(find source -name project.yml -print -quit)
+          set -e
+
+          ROOT="$GITHUB_WORKSPACE/source"
+
+          PROJECT_YML=$(find "$ROOT" -name project.yml -print -quit)
+
           if [ -n "$PROJECT_YML" ]; then
-            cd "$(dirname "$PROJECT_YML")"
-            brew install xcodegen
+            PROJECT_DIR=$(dirname "$PROJECT_YML")
+            echo "Generating project in $PROJECT_DIR"
+            cd "$PROJECT_DIR"
             xcodegen generate
           fi
 
-          PROJECT=$(find source -name "*.xcodeproj" -print -quit)
+          PROJECT=$(find "$ROOT" -name "*.xcodeproj" -print -quit)
+
           if [ -z "$PROJECT" ]; then
-            echo "No Xcode project found in ZIP"
+            echo "ERROR: No Xcode project found in ZIP."
             exit 1
           fi
 
           echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+          echo "Found project: $PROJECT"
 
-      - name: Find scheme
+      - name: Find build scheme
         id: scheme
+        shell: bash
         run: |
-          SCHEME=$(xcodebuild -list -json \
-            -project "${{ steps.locate.outputs.project }}" |
-            python3 -c 'import json,sys; print(json.load(sys.stdin)["project"]["schemes"][0])')
+          set -e
+
+          PROJECT="${{ steps.locate.outputs.project }}"
+
+          SCHEME=$(xcodebuild -list -json -project "$PROJECT" |
+            python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)
+          schemes=d["project"]["schemes"]
+          if not schemes:
+              raise SystemExit("No Xcode schemes found")
+          print(schemes[0])
+          ')
+
           echo "name=$SCHEME" >> "$GITHUB_OUTPUT"
+          echo "Using scheme: $SCHEME"
 
       - name: Build for iPhone 6
+        shell: bash
         run: |
+          set -o pipefail
+
           xcodebuild \
             -project "${{ steps.locate.outputs.project }}" \
             -scheme "${{ steps.scheme.outputs.name }}" \
             -configuration Release \
             -destination "generic/platform=iOS" \
-            -derivedDataPath build \
+            -derivedDataPath "$GITHUB_WORKSPACE/build" \
             IPHONEOS_DEPLOYMENT_TARGET=12.0 \
             ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            build | tee "$GITHUB_WORKSPACE/build.log"
 
-      - name: Package downloaded source
+      - name: Package source ZIP
+        if: always()
+        shell: bash
         run: |
-          cd source
-          zip -qr ../Muzo.zip .
+          cd "$GITHUB_WORKSPACE/source"
+          zip -qr "$GITHUB_WORKSPACE/Muzo.zip" . \
+            -x "*/.git/*" \
+            -x "*/build/*" \
+            -x "*.xcuserstate"
 
-      - name: Upload ZIP
+      - name: Upload source ZIP
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Muzo-iPhone-6
+          name: Muzo-iPhone-6-Source
           path: Muzo.zip
+          if-no-files-found: warn
 
-      - name: Upload compiled app
+      - name: Upload compiled iOS app
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Muzo-iPhone-6-build
+          name: Muzo-iPhone-6-Build
           path: build/Build/Products/Release-iphoneos/
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Muzo-Build-Log
+          path: build.log
+          if-no-files-found: warn
