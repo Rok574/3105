@@ -1,1 +1,63 @@
+name: Build Cord12 IPA from Zip URL
 
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "Direct URL to the Cord12 project .zip archive"
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Download and Extract Project Zip
+        env:
+          ZIP_URL: ${{ inputs.zip_url }}
+        run: |
+          curl -fSL "$ZIP_URL" -o project.zip
+          mkdir -p src
+          unzip -q project.zip -d src
+          PROJECT_YML=$(find src -name "project.yml" -maxdepth 3 | head -n 1)
+          if [ -z "$PROJECT_YML" ]; then
+            echo "Error: project.yml not found in zip archive"
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$PROJECT_YML")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+
+      - name: Generate Xcode Project & Build Unsigned App
+        run: |
+          cd "$PROJECT_DIR"
+          xcodegen generate
+          XCODEPROJ=$(ls -d *.xcodeproj | head -n 1)
+          xcodebuild \
+            -project "$XCODEPROJ" \
+            -scheme Cord12 \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CONFIGURATION_BUILD_DIR="$PWD/build/Release-iphoneos" \
+            build
+
+      - name: Package Unsigned IPA
+        run: |
+          cd "$PROJECT_DIR"
+          mkdir -p Payload
+          cp -r build/Release-iphoneos/*.app Payload/
+          zip -r "$GITHUB_WORKSPACE/Cord12-iOS12.ipa" Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cord12-iOS12-IPA
+          path: Cord12-iOS12.ipa
